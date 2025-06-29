@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <vector>
+#include <cstdio>
 #include "cuda.cuh"
 
 __global__ void launchCubicInitialization(float start_x, float start_y, float start_z,
@@ -51,8 +52,14 @@ void initializeParticles(const std::vector<float>& params, std::vector<Particle>
         fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(err));
         exit(EXIT_FAILURE);
     }
-
-    cudaMemcpyDeviceToHost(d_particles, h_particles, total_particles * 3 * sizeof(float), cudaMemcpyDeviceToHost);
+    
+    // Copy results back: host ← device
+    cudaMemcpy(h_particles, d_particles, total_particles * 3 * sizeof(float), cudaMemcpyDeviceToHost);
+     err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA memcpy error: %s\n", cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+    }
     
     // Free device memory
     cudaFree(d_particles);
@@ -61,9 +68,11 @@ void initializeParticles(const std::vector<float>& params, std::vector<Particle>
     particles.reserve(total_particles);
     for (int i = 0; i < total_particles; ++i) {
         Particle p;
-        p.x = h_particles[i * 3];
-        p.y = h_particles[i * 3 + 1];
-        p.z = h_particles[i * 3 + 2];
+        p.position.x = h_particles[i * 3];
+        p.position.y = h_particles[i * 3 + 1];
+        p.position.z = h_particles[i * 3 + 2];
         particles.push_back(p);
     }
+    // Free host buffer
+    delete[] h_particles;
 }

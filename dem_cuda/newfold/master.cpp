@@ -11,12 +11,10 @@
 void masterProcess(int rank, int size)
 {
     // Example usage of DataTransfer - sending a nested vector
-    std::vector<std::vector<std::pair<int, int>>> data = {{{{1, 1}, {1, 2}, {1, 3}, {3, 4}}, {{1, 5}, {4, 6}, {5, 7}, {6, 8}}, {{8, 9}, {7, 10}}}};
-    sendData<std::vector<std::vector<std::pair<int, int>>>>(data, 1);
-
+    MPI_Barrier(MPI_COMM_WORLD);
     std::map<int, std::pair<int, int>> gpu_map;
     howManyGpus(gpu_map, size);
-
+    std::cout << "Number of GPUs: " << gpu_map.size() << std::endl;
     int domain_height = 100;
     int domain_width = 100;
     int domain_depth = 100;
@@ -98,7 +96,7 @@ void recieveSearchedResultsAndSendToOrigin(const std::map<int, std::pair<int, in
         int gpu_id = pair.first;
         int gpu_rank = pair.second.first;
         int gpu_thread = pair.second.second;
-
+        std::cout << "Receiving search results from GPU " << gpu_id << " with rank " << gpu_rank << " and thread " << gpu_thread << std::endl;
         // Receive the search results from each GPU
         std::vector<std::pair<int, std::vector<std::pair<Particle, std::vector<Particle>>>>> search_results =
             receiveData<std::vector<std::pair<int, std::vector<std::pair<Particle, std::vector<Particle>>>>>>(gpu_rank, gpu_thread + 4);
@@ -235,7 +233,8 @@ void domainDecomposition(std::map<int, std::vector<float>> &domain_params, std::
     checkDomainValidity(x, y, z, particle_radius);
     std::cout << "Domain decomposition parameters: x=" << x << ", y=" << y << ", z=" << z << ", particle_radius=" << particle_radius << std::endl;
     std::cout << "Height: " << domain_height << ", Width: " << domain_width << ", Depth: " << domain_depth << std::endl;
-    // domain parameters for each GPU
+    
+    // Domain parameters for each GPU
     domain_params.clear();
 
     for (const auto &pair : gpu_map)
@@ -288,7 +287,7 @@ void howManyGpus(std::map<int, std::pair<int, int>> &gpu_map, int size)
     for (int i = 1; i < size; i++)
     {
         int count = 0;
-        receiveData<int>(count, 0);
+        count = receiveData<int>(i, 0);
         while (count--)
         {
             auto r = receiveData<std::pair<int, int>>(i, 1);

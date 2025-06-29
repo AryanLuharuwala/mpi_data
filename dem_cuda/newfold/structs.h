@@ -1,6 +1,12 @@
 #ifndef STRUCTS_H
 #define STRUCTS_H
 
+#include <vector>
+#include <iostream>
+#include <map>
+#include <utility>
+
+
 struct Particle_position {
     float x;  // x position
     float y;  // y position

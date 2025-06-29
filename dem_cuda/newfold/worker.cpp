@@ -9,15 +9,18 @@
 #include <faiss/IndexFlat.h>
 #include <faiss/gpu/GpuIndexFlat.h>
 #include <faiss/gpu/StandardGpuResources.h>
+#include <faiss/gpu/GpuIndexIVFPQ.h>
+#include "worker.h"
 
 namespace faiss
 {
     namespace gpu
     {
-        // GPU accelerate two-stage search
-        void rangeSearchFaiss(GpuIndexFlatL2 *index, const std::vector<Particle> &all_particles, const std::vector<Particle> &query_particles,
+        // GPU accelerate two-stage search using IVFPQ index
+        void rangeSearchFaiss(GpuIndexIVFPQ *index, const std::vector<Particle> &all_particles, const std::vector<Particle> &query_particles,
                               float radius_sq, int k_nearest, // Number of nearest neighbours to search radius from
-                              std::vector<std::pair<Particle, std::vector<Particle>>> &particle_neighbors)
+                              std::vector<std::pair<Particle, std::vector<Particle>>> &particle_neighbors, 
+                              int nprobe = 8) // Number of closest centroids to search
         {
             if (all_particles.empty() || query_particles.empty() || index->ntotal == 0)
             {
@@ -36,17 +39,29 @@ namespace faiss
             }
 
             // First stage: Find k nearest neighbours for each query particle
-            faiss::gpu::GpuIndexFlatL2 *gpu_index = index;
+            faiss::gpu::GpuIndexIVFPQ *gpu_index = index;
+            
+            // Set nprobe for search (number of clusters to explore)
+            int old_nprobe = gpu_index->nprobe;
+            gpu_index->nprobe = nprobe;
 
             // Prepare output distances and indices
             int num_queries = query_particles.size();
             std::vector<float> distances(num_queries * k_nearest);
             std::vector<faiss::idx_t> indices(num_queries * k_nearest);
-
+            
+            std::cout << "debug: Performing k_nearest neighbors search with k = " << k_nearest 
+                      << " and nprobe = " << nprobe << std::endl;
+                      
             // Perform k_nearest neighbors search
             gpu_index->search(num_queries, query_positions.data(), k_nearest, distances.data(), indices.data());
+            
+            // Restore original nprobe value
+            gpu_index->nprobe = old_nprobe;
+            
             // Second stage: Filter results based on radius
-            results.reserve(num_queries);
+            std::cout << "Filtering neighbors within radius squared: " << radius_sq << std::endl;
+            particle_neighbors.reserve(num_queries);
             for (int i = 0; i < num_queries; ++i)
             {
                 Particle query_particle = query_particles[i];
@@ -80,22 +95,20 @@ void workerProcess(int rank, int size)
 
     Particle config_particle;
 
-    // Receive the nested vector of integers
-    std::vector<std::vector<std::pair<int, int>>> data;
-    data = receiveData<std::vector<std::vector<std::pair<int, int>>>>(0);
-    std::cout << "Worker " << rank << " received data:\n ";
-
+    std::cout << "Worker " << rank << " started processing" << std::endl;
     int cuda_size;
 
     cudaGetDeviceCount(&cuda_size);
-
+    int thr_size = omp_get_num_threads();
+    std::cout<< thr_size << " threads available for worker " << rank << std::endl;
     omp_set_num_threads(cuda_size);
-    int size = omp_get_num_threads();
-    sendData<int>(size, 0, 0);
+    MPI_Barrier(MPI_COMM_WORLD);
+    sendData<int>(cuda_size, 0, 0);
 
 #pragma omp parallel
     {
         int thread_num = omp_get_thread_num();
+        
 
         std::cout << "Thread " << thread_num << " processing data" << std::endl;
 
@@ -114,81 +127,79 @@ void workerProcess(int rank, int size)
 
         initializeParticlesToConfig(particles, config_particle);
 
-
         notInit(particles, config_particle, params, thread_num);
 
-        // next step
+        // Next step
     }
 }
 
 void notInit(std::vector<Particle> &particles, const Particle &config_particle, const std::vector<float> &params, int thread_num)
 {
 
-        // Build Faiss Index
-        auto faiss_index = buildFaissIndex(particles, thread_num);
+    // Build Faiss Index
+    auto faiss_index = buildFaissIndex(particles, thread_num);
 
-        // particles initialized with config_particle
+    // particles initialized with config_particle
 
-        std::vector<Particle> inzone, outzone;
+    std::vector<Particle> inzone, outzone;
 
-        classifyInZone(particles, inzone, outzone, params, 4);
+    classifyInZone(particles, inzone, outzone, params, 4);
+    std::cout<< inzone.size() << " inzone particles and " << outzone.size() << " outzone particles for thread " << thread_num << std::endl;
 
-        
-        std::vector<std::pair<Particle, std::vector<Particle>>> inzone_particle_neighbors;
-        // Perform range search for each domain
-        inzone_particle_neighbors = searchNearestWithinRadius(
-            faiss_index, inzone, particles, config_particle.properties.radius * 2.0f);
+    std::vector<std::pair<Particle, std::vector<Particle>>> inzone_particle_neighbors;
+    // Perform range search for each domain
+    inzone_particle_neighbors = searchNearestWithinRadius(
+        faiss_index, inzone, particles, 0.5f * 2.0f);
+    std::cout<< inzone_particle_neighbors.size() << " inzone particle neighbors found for thread " << thread_num << std::endl;
+    // Here we process the outzone particles
+    // First sent to master, where it is distributed to other domains
+    // Each domain accumulates all the searches
+    // compiles the results and sends back to the master
+    // Master then sends the results to the respective domains
+    // domain accumulate the results as there may be multiple domains returning results for the particle
 
-        // Here we process the outzone particles
-        // First sent to master, where it is distributed to other domains
-        // Each domain accumulates all the searches
-        // compiles the results and sends back to the master
-        // Master then sends the results to the respective domains
-        // domain accumulate the results as there may be multiple domains returning results for the particle
+    sendData<std::vector<Particle>>(outzone, 0, thread_num + 2);
 
-        sendData<std::vector<Particle>>(outzone, 0, thread_num + 2);
+    // Receive the outzone particles from master
+    receiveAndProcessSearchQueryFromMaster(
+        faiss_index, particles, params, thread_num + 3, thread_num + 4);
 
-        // Receive the outzone particles from master
-        recieveAndProcessSearchQueryFromMaster(
-            faiss_index, particles, params, thread_num + 3, thread_num + 4);
+    // Receive the aggregated search results from the master
+    std::map<Particle, std::vector<Particle>> domain_wise_search_results_for_this_domain =
+        receiveData<std::map<Particle, std::vector<Particle>>>(0, thread_num + 5);
 
-        // Receive the aggregated search results from the master
-        std::map < Particle, std::vector < Particle >>> domain_wise_search_results_for_this_domain =
-                                 receiveData<std::map<Particle, std::vector<Particle>>>(0, thread_num + 5);
+    std::vector<std::pair<Particle, std::vector<Particle>>> outzone_particle_neighbors;
+    outzone_particle_neighbors = searchNearestWithinRadius(
+        faiss_index, outzone, particles, config_particle.properties.radius * 2.0f);
 
-        std::vector<std::pair<Particle, std::vector<Particle>>> outzone_particle_neighbors;
-        outzone_particle_neighbors = searchNearestWithinRadius(
-            faiss_index, outzone, particles, config_particle.properties.radius * 2.0f);
+    // Now we have the inzone and outzone particle neighbors
+    // We can combine them into a single result set
+    // outzone_particle_neighbors contains the neighbors for the outzone particles of this domain
+    // inzone_particle_neighbors contains the neighbors for the inzone particles of this domain
+    // domain_wise_search_results contains the neighbors for the inzone particles of other domains
+    // We need to combine these results
 
-        // Now we have the inzone and outzone particle neighbors
-        // We can combine them into a single result set
-        // outzone_particle_neighbors contains the neighbors for the outzone particles of this domain
-        // inzone_particle_neighbors contains the neighbors for the inzone particles of this domain
-        // domain_wise_search_results contains the neighbors for the inzone particles of other domains
-        // We need to combine these results
+    std::vector<std::pair<Particle, std::vector<Particle>>> combined_particle_neighbors;
 
-        std::vector<std::pair<Particle, std::vector<Particle>>> combined_particle_neighbors;
+    combineParticlesAcrossDomains(
+        inzone_particle_neighbors, outzone_particle_neighbors, domain_wise_search_results_for_this_domain,
+        combined_particle_neighbors);
 
-        combineParticlesAcrossDomains(
-            inzone_particle_neighbors, outzone_particle_neighbors, domain_wise_search_results_for_this_domain,
-            combined_particle_neighbors);
+    // domain_wise_search_results_for_this_domain
+    // Now we have the combined results for this domain
+    // Combined_particle_neighbours
+    // Run any simulation or processing on the combined results
 
-        // domain_wise_search_results_for_this_domain
-        // Now we have the combined results for this domain
-        // Combined_particle_neighbours
-        // Run any simulation or processing on the combined results
-
-
-        //  simulate(combined_particle_neighbors, particles, params);
-
-        postProcessing(particles, params);
-        delete faiss_index; // Clean up the Faiss index
-        faiss_index = nullptr; // Set to nullptr to avoid dangling pointer
-        // particles are now updated with the results of the simulation
+    //  simulate(combined_particle_neighbors, particles, params);
+    std::cout<<"hii"<<std::endl;
+    postProcessing(particles, params);
+    delete faiss_index;    // Clean up the Faiss index
+    faiss_index = nullptr; // Set to nullptr to avoid dangling pointer
+                           // particles are now updated with the results of the simulation
 }
 
 void receiveAndProcessSearchQueryFromMaster(
-    faiss::gpu::GpuIndexFlatL2 *faiss_index,
+    faiss::gpu::GpuIndexIVFPQ *faiss_index,
     const std::vector<Particle> &particles,
     const std::vector<float> &params,
     int receive_tag,
@@ -204,7 +215,7 @@ void receiveAndProcessSearchQueryFromMaster(
     {
         std::vector<Particle> search = search_queries[i].second;
         std::vector<std::pair<Particle, std::vector<Particle>>> result = searchNearestWithinRadius(
-            faiss_index, particles, search, config_particle.properties.radius * 2.0f);
+            faiss_index, particles, search, particles[0].properties.radius * 2.0f);
         search_results[i].first = search_queries[i].first; // Store the domain id
         search_results[i].second = result;                 // Store the results for this domain
     }
@@ -278,7 +289,7 @@ void classifyInZone(
     std::vector<Particle> &inzone,
     std::vector<Particle> &outzone,
     const std::vector<float> &params,
-    int threshold_multiplier = 4)
+    int threshold_multiplier )
 {
     // Params has the start x and x and start y and y and start z and z and particle radius
     // Using a threshold of 4 particle radius
@@ -324,25 +335,25 @@ void classifyInZone(
 }
 
 std::vector<std::pair<Particle, std::vector<Particle>>> searchNearestWithinRadius(
-    faiss::gpu::GpuIndexFlatL2 *index,
+    faiss::gpu::GpuIndexIVFPQ *index,
     const std::vector<Particle> &all_particles,
     const std::vector<Particle> &query_particles,
     float search_radius,
-    int k = 50) // Default to 50 nearest neighbors
+    int k) // Default to 50 nearest neighbors
 {
     std::vector<std::pair<Particle, std::vector<Particle>>> results;
 
     float radius_sq = search_radius * search_radius;
-
+    std::cout << "Searching within radius: " << search_radius << " (squared: " << radius_sq << ")" << std::endl;
     // Perform two-stage search
     faiss::gpu::rangeSearchFaiss(
         index, all_particles, query_particles,
-        radius_sq, k, results);
+        radius_sq, k, results, 8);
 
     return results;
 }
 
-faiss::gpu::GpuIndexFlatL2 *buildFaissIndex(const std::vector<Particle> &particles, int device)
+faiss::gpu::GpuIndexIVFPQ *buildFaissIndex(const std::vector<Particle> &particles, int device)
 {
     // Extract positions to a flat array for FAISS
     std::vector<float> position_data;
@@ -359,17 +370,39 @@ faiss::gpu::GpuIndexFlatL2 *buildFaissIndex(const std::vector<Particle> &particl
     static faiss::gpu::StandardGpuResources gpu_resources;
 
     // Configure GPU index
-    faiss::gpu::GpuIndexFlatConfig config;
+    faiss::gpu::GpuIndexIVFPQConfig config;
     config.device = device;
+    
+    // Define IVFPQ parameters
+    int nlist = std::min(256, int(particles.size() / 30)); // Number of clusters/centroids (adjust based on data size)
+    int m = 1;      // Number of subquantizers (limited by small dimension)
+    int bits = 8;   // Bits per subquantizer (usually 8)
 
-    // Create L2 distance index for 3D points
-    faiss::gpu::GpuIndexFlatL2 *gpu_index =
-        new faiss::gpu::GpuIndexFlatL2(&gpu_resources, 3, config);
+    // For small dimensions (d=3), we need to be careful with parameters
+    if (nlist < 10) nlist = 10; // Ensure minimum number of clusters
 
+    // Create the IVFPQ index directly - the quantizer is created internally
+    faiss::gpu::GpuIndexIVFPQ *gpu_index = 
+        new faiss::gpu::GpuIndexIVFPQ(&gpu_resources, 
+                                     3,              // dimension
+                                     nlist,          // number of centroids
+                                     m,              // number of subquantizers
+                                     bits,           // bits per subquantizer
+                                     faiss::METRIC_L2,
+                                     config);
+    
     // Add positions to index
-    if (!position_data.empty())
-    {
+    if (!position_data.empty()) {
+        // Train the index first (required for IVFPQ)
+        gpu_index->train(particles.size(), position_data.data());
+        
+        // Add the vectors
         gpu_index->add(particles.size(), position_data.data());
+        
+        std::cout << "Built IVFPQ index with " << nlist << " clusters, " 
+                  << m << " subquantizers, and " << bits << " bits" << std::endl;
+    } else {
+        std::cout << "Warning: No particles to index" << std::endl;
     }
 
     return gpu_index;
@@ -379,7 +412,7 @@ void initializeParticlesToConfig(std::vector<Particle> &particles, const Particl
 {
     sendData<int>(particles.size(), 0, omp_get_thread_num());
     int id_start = receiveData<int>(0, omp_get_thread_num());
-
+    std::cout<<particles[1000].position.x << " " << particles[1000].position.y << " " << particles[1000].position.z << std::endl;
     for (int i = 0; i < particles.size(); i++)
     {
         particles[i].position.id = id_start + i;
