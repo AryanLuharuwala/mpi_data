@@ -47,6 +47,31 @@ struct Particle {
 #ifndef __CUDA_ARCH__
     std::vector<int> neighbor_vector;  // dynamic neighbor storage for CPU code
 #endif
+
+    // Comparison operator for using Particle in ordered containers
+    bool operator<(const Particle& other) const {
+        // Compare based on ID first
+        if (position.id != other.position.id) {
+            return position.id < other.position.id;
+        }
+        
+        // If IDs are the same, compare positions
+        if (position.x != other.position.x) {
+            return position.x < other.position.x;
+        }
+        if (position.y != other.position.y) {
+            return position.y < other.position.y;
+        }
+        return position.z < other.position.z;
+    }
+    
+    // Equality operator for comparison
+    bool operator==(const Particle& other) const {
+        return position.id == other.position.id &&
+               position.x == other.position.x &&
+               position.y == other.position.y &&
+               position.z == other.position.z;
+    }
 };
 
 struct Wall {

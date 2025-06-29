@@ -6,6 +6,7 @@
 #include <cmath>
 #include "structs.h"
 #include <algorithm>
+#include "master.h"
 
 void masterProcess(int rank, int size)
 {
@@ -28,25 +29,20 @@ void masterProcess(int rank, int size)
 
     domainDecomposition(domain_params, gpu_map, domain_height, domain_width, domain_depth, particle_radius);
 
-    int num_particles = 0;
-    for (const auto &pair : gpu_map)
-    {
-        int gpu_id = pair.first;
-        int gpu_rank = pair.second.first;
-        int gpu_thread = pair.second.second;
-        // Receive the number of particles from each GPU
-        int particles = receiveData<int>(gpu_rank, gpu_thread);
-        sendData<int>(num_particles, gpu_rank, gpu_thread);
-        num_particles += particles;
-        std::cout << "GPU " << gpu_id << " has " << num_particles << " particles." << std::endl;
-    }
-    std::cout << "Total number of particles across all domains: " << num_particles << std::endl;
-
-    receiveParticleData(gpu_map);
+    // Send the domain parameters to each GPU
+    sendDomainParametersAndUniqueParticleId(domain_params, gpu_map);
+   
+    receiveParticleDataAndSendToDomains(gpu_map);
 
     // Recieve the searched results and accumulate then send to respective GPUs
-    recieveSearchedResults(gpu_map);
+    recieveSearchedResultsAndSendToOrigin(gpu_map);
 
+    migrationHelper(gpu_map);
+}
+
+void migrationHelper(const std::map<int, std::pair<int, int>> &gpu_map)
+{
+    
     std::vector<Particle> all_migration_particles;
     // Migration helper
     for (const auto &pair : gpu_map)
@@ -72,10 +68,28 @@ void masterProcess(int rank, int size)
         sendData<std::vector<Particle>>(all_migration_particles, gpu_rank, gpu_thread + 6);
         std::cout << "Sent outzone particles to GPU " << gpu_id << " with rank " << gpu_rank << " and thread " << gpu_thread << std::endl;
     }
-    
 }
 
-void recieveSearchedResults(const std::map<int, std::pair<int, int>> &gpu_map)
+void sendDomainParametersAndUniqueParticleId(const std::map<int, std::vector<float>> &domain_params,
+                                                  const std::map<int, std::pair<int, int>> &gpu_map)
+{
+     int num_particles = 0;
+    for (const auto &pair : gpu_map)
+    {
+        int gpu_id = pair.first;
+        int gpu_rank = pair.second.first;
+        int gpu_thread = pair.second.second;
+        // Receive the number of particles from each GPU
+        int particles = receiveData<int>(gpu_rank, gpu_thread);
+        sendData<int>(num_particles, gpu_rank, gpu_thread);
+        num_particles += particles;
+        std::cout << "GPU " << gpu_id << " has " << num_particles << " particles." << std::endl;
+    }
+    std::cout << "Total number of particles across all domains: " << num_particles << std::endl;
+}
+
+
+void recieveSearchedResultsAndSendToOrigin(const std::map<int, std::pair<int, int>> &gpu_map)
 {
     std::map<int, std::map<Particle, std::vector<Particle>>> domain_wise_search_results;
     // Receive search results from each GPU
@@ -152,7 +166,7 @@ std::vector<Particle>::iterator findParticle(std::vector<Particle>::iterator beg
     // return 0;
 }
 
-void receiveParticleData(const std::map<int, std::pair<int, int>> &gpu_map)
+void receiveParticleDataAndSendToDomains(const std::map<int, std::pair<int, int>> &gpu_map)
 {
     // Receive particle data from each GPU
     for (const auto &pair : gpu_map)
@@ -222,7 +236,6 @@ void domainDecomposition(std::map<int, std::vector<float>> &domain_params, std::
     std::cout << "Domain decomposition parameters: x=" << x << ", y=" << y << ", z=" << z << ", particle_radius=" << particle_radius << std::endl;
     std::cout << "Height: " << domain_height << ", Width: " << domain_width << ", Depth: " << domain_depth << std::endl;
     // domain parameters for each GPU
-    std::map<int, std::vector<float>> domain_params;
     domain_params.clear();
 
     for (const auto &pair : gpu_map)

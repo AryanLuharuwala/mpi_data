@@ -114,6 +114,16 @@ void workerProcess(int rank, int size)
 
         initializeParticlesToConfig(particles, config_particle);
 
+
+        notInit(particles, config_particle, params, thread_num);
+
+        // next step
+    }
+}
+
+void notInit(std::vector<Particle> &particles, const Particle &config_particle, const std::vector<float> &params, int thread_num)
+{
+
         // Build Faiss Index
         auto faiss_index = buildFaissIndex(particles, thread_num);
 
@@ -123,7 +133,7 @@ void workerProcess(int rank, int size)
 
         classifyInZone(particles, inzone, outzone, params, 4);
 
-        //
+        
         std::vector<std::pair<Particle, std::vector<Particle>>> inzone_particle_neighbors;
         // Perform range search for each domain
         inzone_particle_neighbors = searchNearestWithinRadius(
@@ -135,25 +145,12 @@ void workerProcess(int rank, int size)
         // compiles the results and sends back to the master
         // Master then sends the results to the respective domains
         // domain accumulate the results as there may be multiple domains returning results for the particle
+
         sendData<std::vector<Particle>>(outzone, 0, thread_num + 2);
 
-        std::vector<std::pair<int, std::vector<Particle>>> search_queries = receiveData<std::vector<std::pair<int, std::vector<Particle>>>>(
-            0, thread_num + 3); // Receive the outzone particles from master
-
-        int num_queries = search_queries.size();
-        std::vector<std::pair<int, std::vector<std::pair<Particle, std::vector<Particle>>>>> search_results(num_queries);
-        // Prepare the search queries
-        for (int i = 0; i < num_queries; ++i)
-        {
-            std::vector<Particle> search = search_queries[i].second;
-            std::vector<std::pair<Particle, std::vector<Particle>>> result = searchNearestWithinRadius(
-                faiss_index, particles, search, config_particle.properties.radius * 2.0f);
-            search_results[i].first = search_queries[i].first; // Store the domain id
-            search_results[i].second = result;                 // Store the results for this domain
-        }
-        // Send the search results back to the master
-        sendData < std::vector<std::pair<int, std::vector<std::pair<Particle, std::vector<Particle>>>>>(
-                       search_results, 0, thread_num + 4);
+        // Receive the outzone particles from master
+        recieveAndProcessSearchQueryFromMaster(
+            faiss_index, particles, params, thread_num + 3, thread_num + 4);
 
         // Receive the aggregated search results from the master
         std::map < Particle, std::vector < Particle >>> domain_wise_search_results_for_this_domain =
@@ -172,56 +169,107 @@ void workerProcess(int rank, int size)
 
         std::vector<std::pair<Particle, std::vector<Particle>>> combined_particle_neighbors;
 
-        // Concatenate the outzone results with the inzone results
-        for (const auto &result : inzone_particle_neighbors)
-        {
-            Particle query_particle = result.first;
-            std::vector<Particle> neighbors = result.second;
-            // Inzone and outzone are independent, so we can just add the neighbors
-            combined_particle_neighbors.emplace_back(query_particle, std::move(neighbors));
-        }
-        for (const auto &result : outzone_particle_neighbors)
-        {
-            Particle query_particle = result.first;
-            std::vector<Particle> neighbors = result.second;
-            // domain_wise_search_results_for_this_domain
-            // find the particle in domain_wise_search_results_for_this_domain
+        combineParticlesAcrossDomains(
+            inzone_particle_neighbors, outzone_particle_neighbors, domain_wise_search_results_for_this_domain,
+            combined_particle_neighbors);
 
-            auto it = domain_wise_search_results_for_this_domain.find(query_particle);
-            if (it != domain_wise_search_results_for_this_domain.end())
-            {
-                // If the particle is found in the domain-wise search results, we can add its neighbors
-                const auto &domain_neighbors = it->second;
-                // Add each neighbor to the neighbors vector
-                neighbors.insert(neighbors.end(), domain_neighbors.begin(), domain_neighbors.end());
-            }
-            // Inzone and outzone are independent, so we can just add the neighbors
-            combined_particle_neighbors.emplace_back(query_particle, std::move(neighbors));
-        }
         // domain_wise_search_results_for_this_domain
         // Now we have the combined results for this domain
         // Combined_particle_neighbours
         // Run any simulation or processing on the combined results
-        simulate(combined_particle_neighbors, particles, params);
 
 
-        classifyInZone(particles, inzone, outzone, params, 0);
-        // Send the outzone particles back to the master
-        sendData<std::vector<Particle>>(outzone, 0, thread_num + 6);
+        //  simulate(combined_particle_neighbors, particles, params);
 
-        std::vector<Particle> particles_migrated;
-        // Receive the particles to migrate from the master
-        particles_migrated = receiveData<std::vector<Particle>>(0, thread_num + 7); 
-        std::vector<Particle> migrated_inzone;
-        classifyInzone(particles_migrated, migrated_inzone, nullptr, params, 0);
-        particles.clear();
-        particles.reserve(inzone.size() + migrated_inzone.size());
-        // Combine the inzone particles with the migrated particles
-        particles.insert(particles.end(), inzone.begin(), inzone.end());
-        particles.insert(particles.end(), migrated_inzone.begin(), migrated_inzone.end());
+        postProcessing(particles, params);
+        delete faiss_index; // Clean up the Faiss index
+        faiss_index = nullptr; // Set to nullptr to avoid dangling pointer
+        // particles are now updated with the results of the simulation
+}
 
-        // next step
+void receiveAndProcessSearchQueryFromMaster(
+    faiss::gpu::GpuIndexFlatL2 *faiss_index,
+    const std::vector<Particle> &particles,
+    const std::vector<float> &params,
+    int receive_tag,
+    int send_tag)
+{
+    std::vector<std::pair<int, std::vector<Particle>>> search_queries = receiveData<std::vector<std::pair<int, std::vector<Particle>>>>(
+        0, receive_tag); // Receive the outzone particles from master
+
+    int num_queries = search_queries.size();
+    std::vector<std::pair<int, std::vector<std::pair<Particle, std::vector<Particle>>>>> search_results(num_queries);
+    // Prepare the search queries
+    for (int i = 0; i < num_queries; ++i)
+    {
+        std::vector<Particle> search = search_queries[i].second;
+        std::vector<std::pair<Particle, std::vector<Particle>>> result = searchNearestWithinRadius(
+            faiss_index, particles, search, config_particle.properties.radius * 2.0f);
+        search_results[i].first = search_queries[i].first; // Store the domain id
+        search_results[i].second = result;                 // Store the results for this domain
     }
+    // Send the search results back to the master
+    sendData<std::vector<std::pair<int, std::vector<std::pair<Particle, std::vector<Particle>>>>>>(
+        search_results, 0, send_tag);
+}
+
+void combineParticlesAcrossDomains(
+    const std::vector<std::pair<Particle, std::vector<Particle>>> &inzone_particle_neighbors,
+    const std::vector<std::pair<Particle, std::vector<Particle>>> &outzone_particle_neighbors,
+    const std::map<Particle, std::vector<Particle>> &domain_wise_search_results_for_this_domain,
+    std::vector<std::pair<Particle, std::vector<Particle>>> &combined_particle_neighbors)
+{
+    //
+    // Concatenate the outzone results with the inzone results
+    for (const auto &result : inzone_particle_neighbors)
+    {
+        Particle query_particle = result.first;
+        std::vector<Particle> neighbors = result.second;
+        // Inzone and outzone are independent, so we can just add the neighbors
+        combined_particle_neighbors.emplace_back(query_particle, std::move(neighbors));
+    }
+    for (const auto &result : outzone_particle_neighbors)
+    {
+        Particle query_particle = result.first;
+        std::vector<Particle> neighbors = result.second;
+        // domain_wise_search_results_for_this_domain
+        // find the particle in domain_wise_search_results_for_this_domain
+
+        auto it = domain_wise_search_results_for_this_domain.find(query_particle);
+        if (it != domain_wise_search_results_for_this_domain.end())
+        {
+            // If the particle is found in the domain-wise search results, we can add its neighbors
+            const auto &domain_neighbors = it->second;
+            // Add each neighbor to the neighbors vector
+            neighbors.insert(neighbors.end(), domain_neighbors.begin(), domain_neighbors.end());
+        }
+        // Inzone and outzone are independent, so we can just add the neighbors
+        combined_particle_neighbors.emplace_back(query_particle, std::move(neighbors));
+    }
+}
+
+void postProcessing(
+    std::vector<Particle> &particles,
+    const std::vector<float> &params)
+{
+    std::vector<Particle> inzone, outzone;
+    int thread_num = omp_get_thread_num();
+    classifyInZone(particles, inzone, outzone, params, 0);
+    // Send the outzone particles back to the master
+    sendData<std::vector<Particle>>(outzone, 0, thread_num + 6);
+
+    std::vector<Particle> particles_migrated;
+    // Receive the particles to migrate from the master
+    particles_migrated = receiveData<std::vector<Particle>>(0, thread_num + 7);
+
+    std::vector<Particle> migrated_inzone, migrated_outzone;
+
+    classifyInZone(particles_migrated, migrated_inzone, migrated_outzone, params, 0);
+    particles.clear();
+    particles.reserve(inzone.size() + migrated_inzone.size());
+    // Combine the inzone particles with the migrated particles
+    particles.insert(particles.end(), inzone.begin(), inzone.end());
+    particles.insert(particles.end(), migrated_inzone.begin(), migrated_inzone.end());
 }
 
 // We can use this for zoning as well as domain search

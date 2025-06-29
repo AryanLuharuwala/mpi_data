@@ -560,4 +560,85 @@ std::vector<T> gatherVector(const std::vector<T>& local_data, int root) {
     return gathered_data;
 }
 
+#include "structs.h"
+
+// Template specializations for Particle struct
+template <>
+void sendData(const Particle& data, int dest_rank, int tag) {
+    // Serialize the particle components
+    sendData(data.position, dest_rank, tag);
+    sendData(data.state, dest_rank, tag + 100);
+    sendData(data.properties, dest_rank, tag + 200);
+    
+    // Serialize the fixed-size neighbors array
+    MPI_Send(data.neighbors, MAX_NEIGHBORS, MPI_INT, dest_rank, tag + 300, MPI_COMM_WORLD);
+    MPI_Send(&data.num_neighbors, 1, MPI_INT, dest_rank, tag + 301, MPI_COMM_WORLD);
+    
+    // For CPU-only, also send the vector
+    #ifndef __CUDA_ARCH__
+    sendData(data.neighbor_vector, dest_rank, tag + 400);
+    #endif
+}
+
+template <>
+Particle receiveData(int source_rank, int tag) {
+    MPI_Status status;
+    Particle result;
+    
+    // Deserialize the particle components
+    result.position = receiveData<Particle_position>(source_rank, tag);
+    result.state = receiveData<Particle_state>(source_rank, tag + 100);
+    result.properties = receiveData<Particle_properties>(source_rank, tag + 200);
+    
+    // Deserialize the fixed-size neighbors array
+    MPI_Recv(result.neighbors, MAX_NEIGHBORS, MPI_INT, source_rank, tag + 300, MPI_COMM_WORLD, &status);
+    MPI_Recv(&result.num_neighbors, 1, MPI_INT, source_rank, tag + 301, MPI_COMM_WORLD, &status);
+    
+    // For CPU-only, also receive the vector
+    #ifndef __CUDA_ARCH__
+    result.neighbor_vector = receiveData<std::vector<int>>(source_rank, tag + 400);
+    #endif
+    
+    return result;
+}
+
+// Add specializations for the particle component structs
+template <>
+void sendData(const Particle_position& data, int dest_rank, int tag) {
+    MPI_Send(&data, sizeof(Particle_position), MPI_BYTE, dest_rank, tag, MPI_COMM_WORLD);
+}
+
+template <>
+Particle_position receiveData(int source_rank, int tag) {
+    MPI_Status status;
+    Particle_position result;
+    MPI_Recv(&result, sizeof(Particle_position), MPI_BYTE, source_rank, tag, MPI_COMM_WORLD, &status);
+    return result;
+}
+
+template <>
+void sendData(const Particle_state& data, int dest_rank, int tag) {
+    MPI_Send(&data, sizeof(Particle_state), MPI_BYTE, dest_rank, tag, MPI_COMM_WORLD);
+}
+
+template <>
+Particle_state receiveData(int source_rank, int tag) {
+    MPI_Status status;
+    Particle_state result;
+    MPI_Recv(&result, sizeof(Particle_state), MPI_BYTE, source_rank, tag, MPI_COMM_WORLD, &status);
+    return result;
+}
+
+template <>
+void sendData(const Particle_properties& data, int dest_rank, int tag) {
+    MPI_Send(&data, sizeof(Particle_properties), MPI_BYTE, dest_rank, tag, MPI_COMM_WORLD);
+}
+
+template <>
+Particle_properties receiveData(int source_rank, int tag) {
+    MPI_Status status;
+    Particle_properties result;
+    MPI_Recv(&result, sizeof(Particle_properties), MPI_BYTE, source_rank, tag, MPI_COMM_WORLD, &status);
+    return result;
+}
 #endif // DATA_UTILS_H
