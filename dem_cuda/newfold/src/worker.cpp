@@ -1,16 +1,16 @@
 #include <iostream>
 #include <mpi.h>
 #include <vector>
-#include "structs.h"
-#include "dataUtils.h"
+#include "../include/structs.h"
+#include "../include/dataUtils.h"
 #include <omp.h>
 #include <cuda_runtime.h>
-#include "cuda.cuh"
+#include "../include/cuda.cuh"
 #include <faiss/IndexFlat.h>
 #include <faiss/gpu/GpuIndexFlat.h>
 #include <faiss/gpu/StandardGpuResources.h>
 #include <faiss/gpu/GpuIndexIVFPQ.h>
-#include "worker.h"
+#include "../include/worker.h"
 
 namespace faiss
 {
@@ -90,12 +90,57 @@ namespace faiss
     }
 }
 
+void configSetParticle( Particle &particle)
+{
+    // Set the particle configuration
+    Particle_position position;
+    Particle_state state ;
+    Particle_properties properties;
+    position.id = 0; // Initialize ID, can be set to a unique value later
+    position.x = 0.0f; // Initialize x position
+    position.y = 0.0f; // Initialize y position
+    position.z = 0.0f; // Initialize z position
+    state.velocity_x = 0.0f; // Initialize x velocity
+    state.velocity_y = 0.0f; // Initialize y velocity
+    state.velocity_z = 0.0f; // Initialize z velocity
+    state.acceleration_x = 0.0f; // Initialize x acceleration
+    state.acceleration_y = 0.0f; // Initialize y acceleration
+    state.acceleration_z = 0.0f; // Initialize z acceleration
+    state.force_x = 0.0f; // Initialize x force
+    state.force_y = 0.0f; // Initialize y force
+    state.force_z = 0.0f; // Initialize z force
+    properties.mass = 1.0f; // Example mass, adjust as needed
+    properties.restitution = 0.5f; // Example restitution, adjust as needed
+    properties.friction = 0.5f; // Example friction, adjust as needed
+    properties.young_modulus = 1.0f; // Example Young's modulus, adjust as needed
+    properties.shear_modulus = 0.5f; // Example shear modulus, adjust as needed
+    properties.damping = 0.1f; // Example damping factor, adjust as needed
+    properties.stiffness = 1.0f; // Example stiffness, adjust as needed
+
+    
+
+
+    particle.position = position; // Initialize position
+    particle.state = state;       // Initialize state
+    particle.properties = properties; // Initialize properties
+    
+    
+
+    particle.properties.radius = 0.5f; // Example radius, adjust as needed
+    // Here you can set the particle configuration in your system
+    // For example, you might want to store it in a global or static variable
+    // or pass it to a function that initializes particles in the simulation.
+}
+
 void workerProcess(int rank, int size)
 {
 
+   
     Particle config_particle;
-
+    configSetParticle(config_particle);
+    
     std::cout << "Worker " << rank << " started processing" << std::endl;
+    
     int cuda_size;
 
     cudaGetDeviceCount(&cuda_size);
@@ -128,7 +173,7 @@ void workerProcess(int rank, int size)
         initializeParticlesToConfig(particles, config_particle);
 
         notInit(particles, config_particle, params, thread_num);
-
+        std::cout<<"done"<<std::endl;
         // Next step
     }
 }
@@ -191,7 +236,7 @@ void notInit(std::vector<Particle> &particles, const Particle &config_particle, 
     // Run any simulation or processing on the combined results
 
     //  simulate(combined_particle_neighbors, particles, params);
-    std::cout<<"hii"<<std::endl;
+    
     postProcessing(particles, params);
     delete faiss_index;    // Clean up the Faiss index
     faiss_index = nullptr; // Set to nullptr to avoid dangling pointer
@@ -268,11 +313,11 @@ void postProcessing(
     classifyInZone(particles, inzone, outzone, params, 0);
     // Send the outzone particles back to the master
     sendData<std::vector<Particle>>(outzone, 0, thread_num + 6);
-
+    std::cout<<"here"<<std::endl;
     std::vector<Particle> particles_migrated;
     // Receive the particles to migrate from the master
     particles_migrated = receiveData<std::vector<Particle>>(0, thread_num + 7);
-
+    std::cout<<"there"<<std::endl;
     std::vector<Particle> migrated_inzone, migrated_outzone;
 
     classifyInZone(particles_migrated, migrated_inzone, migrated_outzone, params, 0);

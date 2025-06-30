@@ -1,4 +1,3 @@
-
 # Auto-detect nvcc and CUDA install prefix
 NVCC ?= $(shell which nvcc)
 CUDA_PATH ?= $(shell dirname $(shell dirname $(NVCC)))
@@ -8,15 +7,15 @@ FAISS_PATH ?= $(shell \
   for d in $(subst :, ,$(LD_LIBRARY_PATH)); do \
     if [ -f $$d/libfaiss.so ]; then echo $${d%/lib}; break; fi; \
   done)
-FAISS_PATH=/home/iitkgp01
+
 # Directories
-SRC_DIR = src
-INC_DIR = include
-OBJ_DIR = obj
-BIN_DIR = bin
+SRC_DIR = newfold/src
+INC_DIR = newfold/include
+OBJ_DIR = newfold/obj
+BIN_DIR = newfold/bin
 
 # Include paths
-INCLUDES = -I$(CUDA_PATH)/include -I$(FAISS_PATH) -I$(INC_DIR)
+INCLUDES = -I$(CUDA_PATH)/include -I$(INC_DIR)
 
 # Enable Intel compiler if USE_INTEL=1, otherwise default MPI C++ compiler
 USE_INTEL ?= 0
@@ -26,19 +25,18 @@ ifeq ($(USE_INTEL),1)
   NVCC_OMP_FLAG := -Xcompiler -qopenmp
   NVCC_CCFLAG := -ccbin $(CXX)
 else
-  CXX := mpiicpc
+  CXX := mpicxx
   CPP_OMP_FLAG := -fopenmp
   NVCC_OMP_FLAG := -Xcompiler -fopenmp
   NVCC_CCFLAG :=
 endif
 
 # Compiler flags
-CXXFLAGS := -std=c++17 -Wall -g $(CPP_OMP_FLAG) $(INCLUDES)  -m64 -DMKL_ILP64  -I"${MKLROOT}/include"    -L${MKLROOT}/lib/intel64 -lmkl_sycl -lmkl_intel_ilp64 -lmkl_intel_thread -lmkl_core -lmkl_blacs_intelmpi_ilp64 -liomp5  -lstdc++ -lpthread -lm -ldl
+CXXFLAGS := -std=c++17 -Wall -g $(CPP_OMP_FLAG) $(INCLUDES)
 NVCCFLAGS := -std=c++17 -g $(NVCC_OMP_FLAG) $(NVCC_CCFLAG) $(INCLUDES)
 
 # Linker flags
-# Linker flags
-LDFLAGS := -L$(CUDA_PATH)/lib64 -L$(FAISS_PATH)/faiss/ -L$(HOME)/libs/lapack_build/lapack/lib -Wl,-rpath,$(HOME)/libs/lapack_build/lapack/lib -Wl,-rpath,$(FAISS_PATH)/faiss -lcudart -lfaiss -llapack -lblas -lgfortran -lm $(CPP_OMP_FLAG)
+LDFLAGS := -L$(CUDA_PATH)/lib64 -L$(FAISS_PATH)/lib -lcudart -lfaiss $(CPP_OMP_FLAG)
 
 # Source files - exclude cuda_check.cpp which has its own main function
 CPP_SRCS = $(filter-out $(SRC_DIR)/cuda_check.cpp,$(wildcard $(SRC_DIR)/*.cpp))
@@ -64,7 +62,7 @@ $(shell mkdir -p $(BIN_DIR) $(OBJ_DIR))
 
 # Compile C++ source files
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp $(HEADERS)
-	$(CXX)  -c $< -o $@ $(CXXFLAGS)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Compile CUDA source files
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cu $(HEADERS)
